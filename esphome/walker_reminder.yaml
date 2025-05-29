@@ -1,0 +1,244 @@
+esphome:
+  name: walker-reminder
+  friendly_name: Walker Reminder
+  platform: ESP32
+  board: esp32-c3-devkitm-1
+
+# Development mode flag - set to true during development, false for production
+substitutions:
+  dev_mode: "true"  # Change to "false" for production/battery-saving mode
+
+# Global variables
+globals:
+  - id: wifi_timeout
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+# WiFi configuration - enabled in dev mode, disabled in production
+wifi:
+  disabled: ${{ dev_mode == "false" && id(wifi_timeout) == 0 }}
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  
+  # Fallback hotspot (captive portal) in case WiFi connection fails
+  ap:
+    ssid: "Walker-Reminder"
+    password: "walkerreminder123"
+
+# Enable Home Assistant API in dev mode or when WiFi is temporarily enabled
+api:
+  disabled: ${{ dev_mode == "false" && id(wifi_timeout) == 0 }}
+
+# Enable OTA updates in dev mode or when WiFi is temporarily enabled
+ota:
+  disabled: ${{ dev_mode == "false" && id(wifi_timeout) == 0 }}
+  password: !secret ota_password
+
+# Enable web server in dev mode or when WiFi is temporarily enabled
+web_server:
+  disabled: ${{ dev_mode == "false" && id(wifi_timeout) == 0 }}
+  port: 80
+
+# Enable logging in dev mode, minimal in production
+logger:
+  level: ${{ dev_mode == "true" || id(wifi_timeout) > 0 ? "DEBUG" : "WARN" }}
+  logs:
+    esp32_ble_tracker: ${{ dev_mode == "true" || id(wifi_timeout) > 0 ? "DEBUG" : "WARN" }}
+
+# Deep sleep - only enabled in production mode and when WiFi is not temporarily enabled
+deep_sleep:
+  run_duration: 1s
+  sleep_duration: 9s
+  id: deep_sleep_control
+  enabled: ${{ dev_mode == "false" && id(wifi_timeout) == 0 }}
+
+# Button for enabling WiFi temporarily in production mode
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO9
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Config Button"
+    id: config_button
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return !{{ dev_mode == "true" }};'
+            then:
+              # Enable WiFi for 10 minutes (600 seconds)
+              - lambda: 'id(wifi_timeout) = 600;'
+              - logger.log: "WiFi and OTA updates enabled for 10 minutes"
+              # Blink the buzzer to indicate WiFi is enabled
+              - output.turn_on: buzzer_pin
+              - delay: 100ms
+              - output.turn_off: buzzer_pin
+              - delay: 100ms
+              - output.turn_on: buzzer_pin
+              - delay: 100ms
+              - output.turn_off: buzzer_pin
+              - delay: 100ms
+              - output.turn_on: buzzer_pin
+              - delay: 100ms
+              - output.turn_off: buzzer_pin
+
+# Timer to decrement WiFi timeout counter
+time:
+  - platform: sntp
+    on_time:
+      - seconds: /10
+        then:
+          - if:
+              condition:
+                lambda: 'return id(wifi_timeout) > 0;'
+              then:
+                - lambda: 'id(wifi_timeout) = id(wifi_timeout) - 10 > 0 ? id(wifi_timeout) - 10 : 0;'
+                - if:
+                    condition:
+                      lambda: 'return id(wifi_timeout) == 0;'
+                    then:
+                      - logger.log: "WiFi timeout expired, returning to power-saving mode"
+                      # Blink the buzzer to indicate WiFi is disabled
+                      - output.turn_on: buzzer_pin
+                      - delay: 200ms
+                      - output.turn_off: buzzer_pin
+
+# BLE tracking for iBeacon
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 100ms
+    window: 50ms
+    active: false
+  on_ble_advertise:
+    - then:
+        - lambda: |-
+            // Process only iBeacon advertisements
+            if (!x.get_ibeacon().has_value())
+              return;
+            
+            auto ibeacon = x.get_ibeacon().value();
+            
+            // Check if this is our target iBeacon (replace with your wristband's UUID)
+            if (ibeacon.get_uuid().to_string() == "11111111-2222-3333-4444-555555555555") {
+              // Get RSSI value
+              int rssi = x.get_rssi();
+              
+              // Add to moving average filter
+              static int rssi_values[5] = {-100, -100, -100, -100, -100};
+              static int rssi_index = 0;
+              rssi_values[rssi_index] = rssi;
+              rssi_index = (rssi_index + 1) % 5;
+              
+              // Calculate average RSSI
+              int sum = 0;
+              for (int i = 0; i < 5; i++) {
+                sum += rssi_values[i];
+              }
+              float avg_rssi = sum / 5.0;
+              
+              // Estimate distance using RSSI
+              // Calibration needed: measure RSSI at 1m and adjust txPower
+              int txPower = -59; // Measured RSSI at 1 meter (needs calibration)
+              float ratio = avg_rssi * 1.0 / txPower;
+              float distance;
+              if (ratio < 1.0) {
+                distance = pow(ratio, 10);
+              } else {
+                distance = (0.89976) * pow(ratio, 7.7095) + 0.111;
+              }
+              
+              // Update distance sensor
+              id(beacon_distance).publish_state(distance);
+              
+              // Check if distance exceeds threshold with hysteresis
+              static bool alert_active = false;
+              if (distance > 3.0 && !alert_active) {
+                // Distance exceeds threshold, activate alert
+                id(buzzer_active).turn_on();
+                alert_active = true;
+              } else if (distance < 2.7 && alert_active) {
+                // Distance back within safe range (with hysteresis), deactivate alert
+                id(buzzer_active).turn_off();
+                alert_active = false;
+              }
+            }
+
+# Battery monitoring using built-in battery management
+sensor:
+  - platform: adc
+    pin: GPIO1
+    name: "Battery Voltage"
+    id: battery_voltage
+    update_interval: ${{ dev_mode == "true" ? "10s" : "300s" }}  # More frequent updates in dev mode
+    accuracy_decimals: 2
+    filters:
+      # Direct battery voltage reading from XIAO ESP32C3's built-in battery management
+      - calibrate_linear:
+          - 3.0 -> 3.0  # Adjust these points based on actual measurements
+          - 4.2 -> 4.2
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: 'return x < 3.2;'  # Low battery threshold for Li-ion battery
+            then:
+              - switch.turn_on: low_battery_alert
+
+  - platform: template
+    name: "Beacon Distance"
+    id: beacon_distance
+    unit_of_measurement: "m"
+    accuracy_decimals: 1
+    update_interval: never
+    
+  # WiFi timeout sensor to show remaining time
+  - platform: template
+    name: "WiFi Timeout"
+    id: wifi_timeout_sensor
+    unit_of_measurement: "seconds"
+    accuracy_decimals: 0
+    lambda: 'return id(wifi_timeout);'
+    update_interval: 10s
+
+# Buzzer configuration
+output:
+  - platform: gpio
+    pin: GPIO10
+    id: buzzer_pin
+
+# Buzzer control
+switch:
+  - platform: output
+    name: "Alert Buzzer"
+    output: buzzer_pin
+    id: buzzer_active
+    
+  - platform: template
+    name: "Low Battery Alert"
+    id: low_battery_alert
+    turn_on_action:
+      - output.turn_on: buzzer_pin
+      - delay: 100ms
+      - output.turn_off: buzzer_pin
+      - delay: 100ms
+      - output.turn_on: buzzer_pin
+      - delay: 100ms
+      - output.turn_off: buzzer_pin
+    turn_off_action:
+      - output.turn_off: buzzer_pin
+
+# Development mode indicator
+text_sensor:
+  - platform: template
+    name: "Operation Mode"
+    lambda: |-
+      if (${{ dev_mode == "true" }}) {
+        return {"Development Mode"};
+      } else if (id(wifi_timeout) > 0) {
+        return {"Temporary Config Mode"};
+      } else {
+        return {"Production Mode"};
+      }
+    update_interval: 10s
