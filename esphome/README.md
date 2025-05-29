@@ -41,49 +41,46 @@ This directory contains the ESPHome configuration for the Walker Reminder device
                                     |                 |
                                     |  GPIO10         |
                                     |                 |
-                                    |  GND            |
+                                    |  3.3V           |
                                     |                 |
                                     +-----------------+
 ```
 
 ### Buzzer and Transistor Connections
 ```
-                     VCC/3.3V
+                     3.3V/VCC
                         |
                         |
                         v
 +----------------+      |
 |                |      |
-| Passive Buzzer |<-----+ Positive terminal to VCC/3.3V
+| Passive Buzzer |<-----+ Positive terminal to 3.3V/VCC
 | (3V)           |      
 |                |      
 |                |------+ Negative terminal to Collector
 +----------------+      |
                         |
                         v
-                    Collector
+                     Collector
                         |
-                   +----+----+
-                   |    |    |
-                   |    |    |
-          Base ----+    |    |
-                   |  2N2222 |
-                   |    |    |
-                   |    |    |
-                   +----+----+
-                        |
-                        |
-                        v Emitter
-                        |
-                        |
-                        |
-                        v
-                       GND
-                        ^
-                        |
-                        |
-            1kΩ         |
-        GPIO10-/\/\/\---+
+                   +---------+
+                   |         |
+                   |         |
+                   |  2N2222 |<---+ Base (connected to GPIO10 via resistor)
+                   |         |    |
+                   |         |    |
+                   +---------+    |
+                        |         |
+                        v         |
+                     Emitter      |
+                        |         |
+                        |         |
+                        v         |
+                       GND        |
+                                  |
+                                  |
+                        1kΩ       |
+                    GPIO10-/\/\/\-+
 ```
 
 ## Buzzer Circuit Explanation
